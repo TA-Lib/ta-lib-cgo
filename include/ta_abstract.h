@@ -1,4 +1,4 @@
-/* TA-LIB Copyright (c) 1999-2024, Mario Fortier
+/* TA-LIB Copyright (c) 1999-2026, Mario Fortier
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or
@@ -80,7 +80,7 @@ extern "C" {
  *
  * The abstract interface is used within TA-Lib to perform at least
  * the following:
- *   - used by gen_code to generate all the glue code.
+ *   - used by ta_codegen to generate all the glue code.
  *   - used to generate a XML representation of the TA functions.
  */
 
@@ -142,6 +142,11 @@ TA_LIB_API TA_RetCode TA_FuncTableFree ( TA_StringTable *table );
  * This handle is further used for obtaining information on the
  * parameters needed and also for potentially calling this TA function.
  *
+ * The name is matched without regard to case, under an ASCII fold and not
+ * the caller's locale: "SMA", "sma" and "Sma" all resolve to the same
+ * function. Only the match is folded -- the name reported back through
+ * TA_FuncInfo stays the canonical upper-case "SMA".
+ *
  * For convenience, this handle can also be found in
  * the TA_FuncInfo structure (see below).
  */
@@ -174,13 +179,101 @@ TA_LIB_API TA_RetCode TA_GetFuncHandle( const char *name,
  */
 typedef int TA_FuncFlags;
 #define TA_FUNC_FLG_OVERLAP   0x01000000 /* Output scale same as input data. */
+#define TA_FUNC_FLG_STREAM    0x02000000 /* Function also has a streaming API:
+                                          * TA_<FUNC>_Open/Update/Peek/Close,
+                                          * incremental per-bar evaluation of
+                                          * the batch function's values.
+                                          */
 #define TA_FUNC_FLG_VOLUME    0x04000000 /* Output shall be over the volume data. */
 #define TA_FUNC_FLG_UNST_PER  0x08000000 /* Indicate if this function have an unstable
                                           * initial period. Some additional code exist
                                           * for these functions for allowing to set that
                                           * unstable period. See Documentation.
                                           */
-#define TA_FUNC_FLG_CANDLESTICK 0x10000000 /* Output shall be a candlestick */
+#define TA_FUNC_FLG_CANDLESTICK 0x10000000 /* A candlestick pattern function (CDL*): every
+                                          * integer output is a pattern output. */
+#define TA_FUNC_FLG_PATH_DEP  0x20000000 /* Output value is path-dependent: built
+                                          * up from the first bar (a running
+                                          * accumulation seeded there, or a
+                                          * path-dependent state machine), so it
+                                          * depends on the requested startIdx and
+                                          * may never converge across ranges -- the
+                                          * same bar computed from a different
+                                          * startIdx can differ.
+                                          * e.g. AD, OBV, NVI, PVI, SAR, SAREXT.
+                                          */
+#define TA_FUNC_FLG_NAN_INF_OUT 0x40000000 /* Some inputs of ordinary
+                                          * magnitude have no finite result, so
+                                          * a successful call can write NaN or
+                                          * +/-Inf (e.g. ACOS outside [-1,1],
+                                          * LN of a negative value or of zero,
+                                          * 0/0, x/0). Not set where a
+                                          * non-finite value needs magnitudes
+                                          * large enough to overflow the
+                                          * intermediate arithmetic (~1e160 and
+                                          * up), which no flag describes. The
+                                          * function's page on ta-lib.org says
+                                          * when. ta_regtest holds every
+                                          * function WITHOUT this flag to
+                                          * finite output.
+                                          */
+/* The 0x01000000-and-up run above is the historical allocation and now has one
+ * slot left, 0x80000000 -- the sign bit of the signed TA_FuncFlags, which is
+ * deliberately left unused. Further flags continue from the low end, where all
+ * 24 remaining bits are free (the TA_IN_/TA_OPTIN_/TA_OUT_ flags below live in
+ * their own fields and do not compete for these).
+ */
+#define TA_FUNC_FLG_PERIOD1_IDENTITY 0x00000001
+                                         /* A period of 1 performs no smoothing:
+                                          * every output value is a bit-exact
+                                          * copy of its input value.
+                                          * Declared by the function rather than
+                                          * inferred, because the two cases are
+                                          * indistinguishable in the source:
+                                          * SMA's window math is already exact at
+                                          * a period of 1, while EMA's recurrence
+                                          * needs an explicit arm to be. e.g.
+                                          * SMA, EMA, VWMA.
+                                          * NOT set on MACD/MACDFIX: only their
+                                          * signal stage degenerates, the MACD
+                                          * line is still computed.
+                                          * ta_regtest sweeps every function
+                                          * carrying this flag and holds it to the
+                                          * copy on every API tier.
+                                          */
+#define TA_FUNC_FLG_DISPLAY_SHIFT 0x00000002
+                                         /* At least one output carries
+                                          * TA_OUT_DISPLAY_SHIFT: a chart draws it
+                                          * ahead of or behind the bar that
+                                          * computed it. Without this flag every
+                                          * output's display shift is 0. e.g. DPO.
+                                          */
+#define TA_FUNC_FLG_USES_TRANSCENDENTAL 0x00000004
+                                         /* The function calls a transcendental
+                                          * math function (exp, log, log10,
+                                          * trigonometric, inverse trigonometric
+                                          * or hyperbolic), so a value may differ
+                                          * slightly between languages, between a
+                                          * stream and a batch call, and between
+                                          * machines. Not set on a function that
+                                          * reaches one only when an MA-type
+                                          * parameter selects MAMA or ALMA.
+                                          * e.g. SIN, LN, HT_SINE.
+                                          */
+#define TA_FUNC_FLG_POSITIVE_INPUT 0x00000008
+                                         /* The function assumes its input is
+                                          * positive: it divides by the input,
+                                          * takes its logarithm or root, or
+                                          * measures a percent of it. A series
+                                          * that reaches or crosses zero, such
+                                          * as an oscillator or a spread, gets
+                                          * TA_SUCCESS and an output that may
+                                          * have no meaning. Declaration only:
+                                          * the data is not checked. The
+                                          * function's page on ta-lib.org says
+                                          * what a zero or a negative value does.
+                                          * e.g. ROC, NATR, ZIGZAG, LN.
+                                          */
 
 typedef struct TA_FuncInfo
 {
@@ -192,7 +285,6 @@ typedef struct TA_FuncInfo
    const char * group;
 
    const char * hint;
-   const char * camelCaseName;
    TA_FuncFlags flags;
 
    unsigned int nbInput;
@@ -352,6 +444,10 @@ typedef int TA_OptInputFlags;
 
 /* The following are flags giving hint on what
  * could be done with the output.
+ *
+ * A pattern output writes 0 or sign x level: the sign flags say which signs
+ * occur and whether 0 does, and the level flags which levels occur besides 100.
+ * Reading them: rule rW7 of the TA-Lib specification.
  */
 typedef int TA_OutputFlags;
 #define TA_OUT_LINE              0x00000001 /* Suggest to display as a connected line. */
@@ -359,14 +455,25 @@ typedef int TA_OutputFlags;
 #define TA_OUT_DASH_LINE         0x00000004 /* Suggest to display as a 'dashed' line. */
 #define TA_OUT_DOT               0x00000008 /* Suggest to display with dots only. */
 #define TA_OUT_HISTO             0x00000010 /* Suggest to display as an histogram. */
-#define TA_OUT_PATTERN_BOOL      0x00000020 /* Indicates if pattern exists (!=0) or not (0) */
-#define TA_OUT_PATTERN_BULL_BEAR 0x00000040 /* =0 no pattern, > 0 bullish, < 0 bearish */
-#define TA_OUT_PATTERN_STRENGTH  0x00000080 /* =0 neutral, ]0..100] getting bullish, ]100..200] bullish, [-100..0[ getting bearish, [-200..100[ bearish */
-#define TA_OUT_POSITIVE          0x00000100 /* Output can be positive */
-#define TA_OUT_NEGATIVE          0x00000200 /* Output can be negative */
-#define TA_OUT_ZERO              0x00000400 /* Output can be zero */
+#define TA_OUT_PATTERN_BOOL      0x00000020 /* Two states: 0 = no pattern, non-zero = pattern. */
+#define TA_OUT_PATTERN_BULL_BEAR 0x00000040 /* The sign is a call: + bullish, - bearish. */
+#define TA_OUT_PATTERN_CONFIRM   0x00000080 /* Level 200 occurs too: this bar confirms the
+                                             * output's most recent earlier pattern. */
+#define TA_OUT_PATTERN_STRENGTH  TA_OUT_PATTERN_CONFIRM /* Deprecated name. */
+#define TA_OUT_POSITIVE          0x00000100 /* Positive values occur. */
+#define TA_OUT_NEGATIVE          0x00000200 /* Negative values occur. */
+#define TA_OUT_ZERO              0x00000400 /* 0 occurs; on a pattern output, no pattern on
+                                             * this bar. An output setting any of these three
+                                             * declares all its signs; one setting none, nothing. */
 #define TA_OUT_UPPER_LIMIT       0x00000800 /* Indicates that the values represent an upper limit. */
 #define TA_OUT_LOWER_LIMIT       0x00001000 /* Indicates that the values represent a lower limit. */
+#define TA_OUT_NULLABLE          0x00002000 /* Deprecated: never set; every output is required. */
+#define TA_OUT_DISPLAY_SHIFT     0x00004000 /* A chart draws this output ahead of or behind the bar
+                                             * that computed it, by the number of bars
+                                             * TA_GetDisplayShift reports. The values themselves are
+                                             * never shifted. */
+#define TA_OUT_PATTERN_WEAK      0x00008000 /* Level 80 occurs too: a weaker form of the pattern,
+                                             * on the same bar. */
 
 
 /* The following 3 structures will exist for each input, optional
@@ -447,18 +554,19 @@ TA_LIB_API TA_RetCode TA_GetOutputParameterInfo( const TA_FuncHandle *handle,
 /* Alloc a structure allowing to build the list of parameters
  * for doing a call.
  *
- * All input and output parameters must be setup. If not, TA_BAD_PARAM
- * will be returned when TA_CallFunc is called.
+ * All input and output parameters must be setup, or TA_CallFunc fails.
  *
  * The optional input are not required to be setup. A default value
  * will always be used in that case.
  *
  * If there is an attempts to set a parameter with the wrong function
- * (and thus the wrong type), TA_BAD_PARAM will be immediatly returned.
+ * (and thus the wrong type), an error is immediatly returned.
  *
  * Although this mechanism looks complicated, it is written for being fairly solid.
  * If you provide a wrong parameter value, or wrong type, or wrong pointer etc. the
- * library shall return TA_BAD_PARAM or TA_BAD_OBJECT and not hang.
+ * library shall return an error and not hang. No TA function returns the codes
+ * 4 to 11 and 15 of TA_RetCode: one of them from TA_CallFunc means the call was
+ * refused here and the function did not run.
  */
 typedef struct TA_ParamHolder
 {
@@ -528,6 +636,18 @@ TA_LIB_API TA_RetCode TA_SetOutputParamRealPtr( TA_ParamHolder *params,
  */
 TA_LIB_API TA_RetCode TA_GetLookback( const TA_ParamHolder *params,
                                       TA_Integer *lookback );
+
+/* Where a chart draws one output: the value computed at bar i is drawn at
+ * bar i + displayShift. The values themselves are never shifted.
+ *
+ * outputIdx is zero for the first output. As with TA_GetLookback, a
+ * rejection is reported in the value, not the return code: displayShift is
+ * INT_MIN for parameters the lookback rejects and for an outputIdx that
+ * names no output.
+ */
+TA_LIB_API TA_RetCode TA_GetDisplayShift( const TA_ParamHolder *params,
+                                          unsigned int outputIdx,
+                                          TA_Integer *displayShift );
 
 /* Finally, call the TA function with the parameters.
  *

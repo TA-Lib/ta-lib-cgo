@@ -2,6 +2,8 @@ package ta_test
 
 import (
 	"math"
+	"slices"
+	"strconv"
 	"testing"
 
 	ta "github.com/TA-Lib/ta-lib-cgo"
@@ -136,6 +138,39 @@ func TestOutBufReuse(t *testing.T) {
 	}
 }
 
+// An outBuf sharing memory with the input must not be written to; one that only touches it
+// is still reused. Offsets index one backing array of 3n elements.
+func TestOutBufOverlappingInput(t *testing.T) {
+	n := len(prices)
+	want := ta.Sma(prices, 10, nil)
+	for _, tc := range []struct {
+		name                  string
+		inOff, bufOff, bufLen int
+		reuse                 bool
+	}{
+		{"buffer is the input", n, n, n, false},
+		{"buffer starts inside the input", n, n + 2, n, false},
+		{"buffer ends inside the input", n, 2, n, false},
+		{"only the capacity reaches the input", n, n - 1, 0, false},
+		{"buffer ends where the input starts", n, 0, 0, true},
+		{"buffer starts where the input ends", n, 2 * n, 0, true},
+	} {
+		back := make([]float64, 3*n)
+		in := back[tc.inOff : tc.inOff+n]
+		copy(in, prices)
+		out := ta.Sma(in, 10, back[tc.bufOff:tc.bufOff+tc.bufLen])
+		if !slices.EqualFunc(out, want, func(a, b float64) bool { return a == b || isNaN(a) && isNaN(b) }) {
+			t.Errorf("%s: output differs from Sma with a nil outBuf", tc.name)
+		}
+		if !slices.Equal(in, prices) {
+			t.Errorf("%s: input was modified", tc.name)
+		}
+		if reused := &out[0] == &back[tc.bufOff]; reused != tc.reuse {
+			t.Errorf("%s: outBuf reused = %v, want %v", tc.name, reused, tc.reuse)
+		}
+	}
+}
+
 func TestOutBufReallocWhenTooSmall(t *testing.T) {
 	small := make([]float64, 1) // cap < len(prices)
 	out := ta.Sma(prices, 10, small)
@@ -166,7 +201,113 @@ func TestPanicOnEmptyInput(t *testing.T) {
 	ta.Sma([]float64{}, 10, nil)
 }
 
-// --- Checkpoint 1e: lookback sanity ---
+// assertBadParamPanic checks that f panics with a *ta.TALibError carrying TA_BAD_PARAM,
+// not a Go runtime error.
+func assertBadParamPanic(t *testing.T, name string, f func()) {
+	t.Helper()
+	defer func() {
+		t.Helper()
+		r := recover()
+		if r == nil {
+			t.Fatalf("%s: expected panic, got none", name)
+		}
+		err, ok := r.(*ta.TALibError)
+		if !ok {
+			t.Fatalf("%s: panic value is %T (%v), want *ta.TALibError", name, r, r)
+		}
+		if err.RetCode != 2 {
+			t.Errorf("%s: RetCode = %d, want 2 (TA_BAD_PARAM)", name, err.RetCode)
+		}
+	}()
+	f()
+}
+
+func TestPanicOnInvalidPeriod(t *testing.T) {
+	assertBadParamPanic(t, "Sma(period=MinInt32)", func() { ta.Sma(prices, math.MinInt32, nil) })
+	assertBadParamPanic(t, "Sma(period=0)", func() { ta.Sma(prices, 0, nil) })
+	assertBadParamPanic(t, "Sma(period=-5)", func() { ta.Sma(prices, -5, nil) })
+}
+
+func TestPanicOnInvalidMAType(t *testing.T) {
+	assertBadParamPanic(t, "Ma(maType=99)", func() { ta.Ma(prices, 10, 99, nil) })
+	assertBadParamPanic(t, "Bbands(maType=99)", func() { ta.Bbands(prices, 20, 2.0, 2.0, 99, nil, nil, nil) })
+}
+
+func TestPanicOnIntBeyondCInt(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("every int fits in a C int")
+	}
+	var p32, p31 int64 = 1<<32 + 3, 1 << 31
+	assertBadParamPanic(t, "Sma(period=1<<32+3)", func() { ta.Sma(prices, int(p32), nil) })
+	assertBadParamPanic(t, "Ma(maType=1<<32)", func() { ta.Ma(prices, 10, int(p32-3), nil) })
+	if got := ta.SmaLookback(int(p31)); got != -1 {
+		t.Errorf("SmaLookback(1<<31) = %d, want -1", got)
+	}
+}
+
+func TestPanicOnMismatchedInputLengths(t *testing.T) {
+	high, low, _, closePrice, _ := ohlcv(len(prices))
+	assertBadParamPanic(t, "Atr(short low)", func() { ta.Atr(high, low[:len(low)-1], closePrice, 14, nil) })
+	assertBadParamPanic(t, "Atr(long close)", func() { ta.Atr(high, low, append(closePrice, 1), 14, nil) })
+}
+
+// --- Checkpoint 1e: series no longer than the lookback ---
+
+func TestShortSeriesAllNaN(t *testing.T) {
+	period := 10
+	lb := ta.SmaLookback(period)
+	for _, n := range []int{1, lb - 1, lb} {
+		in := prices[:n]
+		out := ta.Sma(in, period, nil)
+		if len(out) != n {
+			t.Errorf("Sma(n=%d, period=%d): output length %d, want %d", n, period, len(out), n)
+			continue
+		}
+		for i, v := range out {
+			if !isNaN(v) {
+				t.Errorf("Sma(n=%d, period=%d): out[%d] = %v, want NaN", n, period, i, v)
+			}
+		}
+	}
+}
+
+func TestShortSeriesReusesOutBuf(t *testing.T) {
+	buf := make([]float64, 5)
+	for i := range buf {
+		buf[i] = 42
+	}
+	out := ta.Sma(prices[:5], 10, buf)
+	if &out[0] != &buf[0] {
+		t.Error("Sma(short): outBuf with sufficient cap should be reused, but got a new allocation")
+	}
+	for i, v := range out {
+		if !isNaN(v) {
+			t.Errorf("Sma(short): out[%d] = %v, want NaN", i, v)
+		}
+	}
+}
+
+func TestShortSeriesInt32Zero(t *testing.T) {
+	lb := ta.CdldojiLookback()
+	if lb < 1 {
+		t.Fatalf("CdldojiLookback() = %d, want >= 1 for this test", lb)
+	}
+	high, low, open, closePrice, _ := ohlcv(lb)
+	for _, n := range []int{1, lb} {
+		out := ta.Cdldoji(open[:n], high[:n], low[:n], closePrice[:n], []int32{7, 7, 7})
+		if len(out) != n {
+			t.Errorf("Cdldoji(n=%d): output length %d, want %d", n, len(out), n)
+			continue
+		}
+		for i, v := range out {
+			if v != 0 {
+				t.Errorf("Cdldoji(n=%d): out[%d] = %d, want 0", n, i, v)
+			}
+		}
+	}
+}
+
+// --- Checkpoint 1f: lookback sanity ---
 
 func TestSmaLookback(t *testing.T) {
 	// SMA(n) lookback is n-1 for n >= 2 (period=1 is invalid in TA-Lib).
@@ -183,7 +324,7 @@ func TestSmaLookback(t *testing.T) {
 	}
 }
 
-// --- Checkpoint 1f: known SMA values (hand-verifiable) ---
+// --- Checkpoint 1g: known SMA values (hand-verifiable) ---
 
 func TestSmaKnownValues(t *testing.T) {
 	in := []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}

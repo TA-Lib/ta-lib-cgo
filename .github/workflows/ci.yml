@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # update.yml starts this run on its branch: a pull request opened with the
+  # workflow token does not trigger workflows.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  musl:
+    runs-on: ubuntu-latest
+    container: golang:alpine
+    steps:
+      - run: apk add --no-cache gcc musl-dev git
+      - uses: actions/checkout@v7
+      - run: go test -count=1 ./...
+
+  # The embedded C must return the same bits as the TA-Lib library built from the
+  # same tag on the same machine. testdata/golden only holds another machine's
+  # values, which the default test compares with a tolerance.
+  exact:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: ubuntu-24.04-arm
+            cc: gcc
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go run ./cmd/golden -out "$RUNNER_TEMP/golden"
+      - run: go test -count=1 -run Golden ./...
+        env:
+          TALIB_GOLDEN_DIR: ${{ runner.temp }}/golden
+          TALIB_GOLDEN_EXACT: 1
+
+  # testdata/golden is left out: its last bits depend on the machine's libm.
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go generate ./...
+      - name: Generated files are up to date
+        run: |
+          if [ -n "$(git status --porcelain -- . ':!testdata/golden')" ]; then
+            git status --short -- . ':!testdata/golden'
+            git diff --stat -- . ':!testdata/golden'
+            echo "::error::go generate changed committed files; run it and commit the result"
+            exit 1
+          fi

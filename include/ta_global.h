@@ -88,10 +88,13 @@ typedef struct
   void *global;
 } TA_ModuleControl;
 
+/* Settings in candleSettings[], indexed by TA_CandleSettingType. Excludes
+ * TA_AllCandleSettings, which is a pinned selector, not a count. */
+#define TA_NB_CANDLE_SETTING 11
+
 /* This is the hidden implementation of TA_Libc. */
 typedef struct
 {
-   unsigned int magicNb; /* Unique identifier of this object. */
    TA_ModuleControl moduleControl[TA_NB_GLOBAL_ID];
 
    unsigned int traceEnabled;
@@ -100,20 +103,46 @@ typedef struct
 
    const char *localCachePath;
 
-   /* For handling the compatibility with other software */
-   TA_Compatibility compatibility;
-
    /* For handling the unstable period of some TA function. */
-   unsigned int unstablePeriod[TA_FUNC_UNST_ALL];
+   unsigned int unstablePeriod[TA_FUNC_UNST_COUNT];
 
    /* For handling the candlestick global settings */
-   TA_CandleSetting candleSettings[TA_AllCandleSettings];
+   TA_CandleSetting candleSettings[TA_NB_CANDLE_SETTING];
 
 } TA_LibcPriv;
 
 /* The following global is used all over the place 
  * and is the entry point for all other globals.
  */
-extern TA_LibcPriv *TA_Globals;
+
+/* Exported from the ELF/Mach-O library although no installed header declares
+ * it: the library builds hidden-by-default, and ta_regtest reaches this to poke
+ * state no public entry point can. Un-export it and the autotools ta_regtest
+ * stops linking -- which is Homebrew's and Debian's build, not just ours.
+ * Never __declspec(dllexport): the Windows DLL has never carried it, and the
+ * static library the Windows tools link does not need it.
+ */
+#if !defined(_WIN32) && defined(__GNUC__) && __GNUC__ >= 4
+  #define TA_LIB_INTERNAL_EXPORT __attribute__ ((visibility("default")))
+#else
+  #define TA_LIB_INTERNAL_EXPORT
+#endif
+
+extern TA_LIB_INTERNAL_EXPORT TA_LibcPriv *TA_Globals;
+
+/* TA_VMATH_KERNEL - whether the batch loop of the functions that are one
+ * math-library call per element calls a platform kernel (TA_VMATH_MAP in
+ * ta_func/ta_utility.h). The condition uses only macros the compiler predefines,
+ * and is true for macOS alone among Apple's systems. Always defined, 1 or 0: test
+ * its value, never defined().
+ */
+#if defined( __APPLE__ ) && defined( __aarch64__ ) && defined( __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ )
+   #define TA_VMATH_KERNEL 1
+   typedef void (*TA_VMathRoutine)( double *out, const double *in, const int *count );
+   TA_VMathRoutine TA_VMathBind( const char *symbol );
+   void TA_VMathUnbound( double *out, const double *in, const int *count );
+#else
+   #define TA_VMATH_KERNEL 0
+#endif
 
 #endif

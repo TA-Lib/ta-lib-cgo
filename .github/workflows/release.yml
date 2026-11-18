@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [version_gen.go]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to bump
+        type: choice
+        options: [patch, minor]
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  tag:
+    # Only the official repository publishes. A fork that syncs main must not
+    # tag releases of its own.
+    if: github.repository == 'TA-Lib/ta-lib-cgo'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUMP: ${{ github.event_name == 'push' && 'minor' || inputs.bump }}
+      BEFORE: ${{ github.event.before }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Tag and release
+        run: |
+          if ! grep -qx 'module github.com/TA-Lib/ta-lib-cgo' go.mod; then
+            echo "::error::go.mod does not declare github.com/TA-Lib/ta-lib-cgo: not the official module"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::releases are tagged from main"
+            exit 1
+          fi
+          version() { sed -n 's/^const TALibVersion = "\(.*\)"$/\1/p'; }
+          talib="$(version < version_gen.go)"
+          releases() { git tag -l 'v*' --sort=-v:refname "$@" | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1; }
+          tag="$(releases --points-at HEAD)"
+          if [ -z "$tag" ]; then
+            if [ "$GITHUB_EVENT_NAME" = push ] &&
+               [ "$(git show "$BEFORE:version_gen.go" 2>/dev/null | version)" = "$talib" ]; then
+              echo "The embedded TA-Lib version did not change."
+              exit 0
+            fi
+            last="$(releases --merged HEAD)"
+            if [ -z "$last" ]; then
+              echo "::error::no vX.Y.Z tag to bump"
+              exit 1
+            fi
+            # A rerun of an older commit's run must not outrank a newer release.
+            if [ "$(releases)" != "$last" ]; then
+              echo "::error::the latest release $(releases) is not an ancestor of HEAD"
+              exit 1
+            fi
+            IFS=. read -r major minor patch <<<"${last#v}"
+            if [ "$BUMP" = minor ]; then minor=$((minor + 1)); patch=0; else patch=$((patch + 1)); fi
+            tag="v$major.$minor.$patch"
+            git tag "$tag"
+            git push origin "$tag"
+          else
+            echo "HEAD is already tagged $tag."
+          fi
+          # Also reached by a rerun after the tag went out and the release did not.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag (TA-Lib $talib)" --generate-notes \
+              --notes "Embeds [TA-Lib $talib](https://github.com/TA-Lib/ta-lib/releases/tag/v$talib)."
+          fi

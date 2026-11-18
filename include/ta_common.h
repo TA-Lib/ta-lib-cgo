@@ -1,4 +1,4 @@
-/* TA-LIB Copyright (c) 1999-2024, Mario Fortier
+/* TA-LIB Copyright (c) 1999-2026, Mario Fortier
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or
@@ -33,28 +33,37 @@
 #ifndef TA_COMMON_H
 #define TA_COMMON_H
 
-/* The following macros are used to return internal errors.
+/* The following macro is used to return internal errors.
  * The Id can be from 1 to 999 and translate to the user
- * as the return code 5000 to 5999.
+ * as the return code 5001 to 5999.
  *
- * Everytime you wish to add a new fatal error code,
- * use the "NEXT AVAILABLE NUMBER" and increment the
- * number in this file.
+ * The generated function tier (src/ta_func) gives every
+ * guard its own Id, so the number names the guard that
+ * fired rather than the class it belongs to. A caller must
+ * therefore test ">= TA_INTERNAL_ERROR", never "==":
+ * TA_UNKNOWN_ERR is the only member above it.
  *
- * NEXT AVAILABLE NUMBER: 181
+ * Ids 1 to 180 were allocated by hand and are still held by
+ * ta_regtest, ta_abstract and ta_memory.h's CIRCBUF_INIT.
+ * Everything above comes from
+ * ta_codegen/input/internal_error_ids.yaml, whose "next" is
+ * the NEXT AVAILABLE NUMBER for hand-written sites too:
+ * take it and raise it there. An Id is never reused.
  */
 #define TA_INTERNAL_ERROR(Id) ((TA_RetCode)(TA_INTERNAL_ERROR+Id))
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
+/* System includes stay outside extern "C": a C++ translation unit must see
+ * them with their own linkage. */
 #include <stdio.h>
 #include <limits.h>
 #include <float.h>
 
 #ifndef TA_DEFS_H
    #include "ta_defs.h"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 /* Some functions to get the version of TA-Lib.
@@ -111,7 +120,7 @@ typedef struct TA_StringTable
  * Example:
  *        TA_RetCodeInfo info;
  *
- *        retCode = TA_Initialize( ... );
+ *        retCode = TA_SMA( ... );
  *
  *        if( retCode != TA_SUCCESS )
  *        {
@@ -123,7 +132,7 @@ typedef struct TA_StringTable
  *        }
  *
  * Would display:
- *        "Error 1(TA_LIB_NOT_INITIALIZE): TA_Initialize was not sucessfully called"
+ *        "Error 2(TA_BAD_PARAM): A parameter is out of range"
  */
 typedef struct TA_RetCodeInfo
 {
@@ -134,24 +143,29 @@ typedef struct TA_RetCodeInfo
 /* Info is always returned, even when 'theRetCode' is invalid. */
 TA_LIB_API void TA_SetRetCodeInfo( TA_RetCode theRetCode, TA_RetCodeInfo *retCodeInfo );
 
-/* TA_Initialize() initialize the ressources used by TA-Lib. This
- * function must be called once prior to any other functions declared in
- * this file.
+/* TA_Initialize() must be called once, and only once, per process, before
+ * any other TA function.
  *
- * TA_Shutdown() allows to free all ressources used by TA-Lib. Following
- * a shutdown, TA_Initialize() must be called again for re-using TA-Lib.
+ * TA_Shutdown() should be called before the application exits; the library
+ * must not be used after it.
  *
- * TA_Shutdown() should be called prior to exiting the application code.
+ * The unstable period and the candle settings are process-wide. Change them
+ * only while no TA function is running and no stream is open; the effect of a
+ * change made otherwise is undefined.
  */
 TA_LIB_API TA_RetCode TA_Initialize( void );
 TA_LIB_API TA_RetCode TA_Shutdown( void );
 
-/* TA_LIB_SOURCES_DIGEST helps for TA-Lib automated maintenance.
- *
- * This value is updated whenever a make, cmake or any source files
- * modification should trig a repackaging of TA-Lib.
+/* TA_GetRuntimeInfo() reports run-time state of this library, by key.
+ * The keys: https://ta-lib.org/spec/abstract/#runtime-info
  */
-#define TA_LIB_SOURCES_DIGEST f56bc6c0c0d72f1ee648897220e3ec3f
+TA_LIB_API TA_RetCode TA_GetRuntimeInfo( const char *key, int *value );
+
+/* TA_LIB_SOURCES_DIGEST helps for TA-Lib automated maintenance: it changes
+ * whenever a source modification should trigger a repackaging of TA-Lib.
+ * Written by scripts/sync.py; do not edit.
+ */
+#define TA_LIB_SOURCES_DIGEST 2125423eb9c1ebfc3768d4baba708aa2
 
 #ifdef __cplusplus
 }

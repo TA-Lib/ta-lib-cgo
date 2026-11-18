@@ -7,6 +7,10 @@ no system library installation required. Users need only `go get`.  A working CG
 > TA-Lib GitHub organization. The import path has changed to `github.com/TA-Lib/ta-lib-cgo`
 > and this is the canonical location going forward.
 
+> **Pure Go:** TA-Lib also publishes an official pure-Go module, [`ta-lib.github.io/go`](https://ta-lib.org/api/go/),
+> generated from the same source as the C library: no cgo, batch and streaming. Use this package when you
+> want the C library itself.
+
 ## Quick start
 
 ```go
@@ -35,12 +39,13 @@ for _, batch := range batches {
 }
 ```
 
-If `outBuf` is nil or its capacity is less than the input length, a new slice is allocated.
+If `outBuf` is nil, its capacity is less than the input length, or it shares memory with an input, a new slice is allocated.
 
 ## Lookback and NaN padding
 
 All output slices have the same length as the input. The first `Lookback` positions are filled
-with `NaN` (the "warmup" period where insufficient data exists for a valid output).
+with `NaN` (the "warmup" period where insufficient data exists for a valid output). Integer outputs,
+such as the candlestick patterns and `Maxindex`, hold `0` there.
 
 ```go
 lb := ta.SmaLookback(3) // returns 2
@@ -74,13 +79,13 @@ Or feel free to try using other C compilers, untested but might work just fine.
 
 Existing Go TA-Lib approaches have significant trade-offs:
 
-- **Pure-Go reimplementations** diverge from the reference C implementation and require ongoing
+- **Hand-ported pure-Go reimplementations** diverge from the reference C implementation and require ongoing
   maintenance to stay in sync. Any upstream bug fix or edge-case change must be manually ported.
 - **System-library wrappers** require TA-Lib to be pre-installed (`apt install`, `brew install`,
   etc.), complicating builds, CI, and distribution — especially across macOS and Linux.
 
 This library takes a different approach: the TA-Lib C source is embedded directly as an
-amalgamation file (`talib_amalgamation.c`), committed to the repository. CGO compiles it as
+amalgamation (the `talib_amalgamation_NN.c` files), committed to the repository. CGO compiles it as
 part of the normal `go build`. Algorithm correctness is guaranteed by the upstream C
 implementation, and you get a single `go get` with no external dependencies.
 
@@ -92,40 +97,43 @@ allocations in tight loops.
 
 A sensible set of tests are included, some of them generated.  The objective with the test suite is to provide some decent coverage that provides some proof this thing actually works, while not introducing a significant maintenance burden of trying to exhaustively prove what TA-Lib already implements and handles.
 
+Every TA-Lib function is also checked against `testdata/golden/`: the output of the official TA-Lib build of the same version, with default parameters, recorded by `cmd/golden`.  Those values were computed on another machine, and floating-point results can differ in the last bits between machines, so that comparison allows a relative error of 1e-9.  To check that the embedded C returns exactly the bits of the official build on your own machine (CI does this on its Linux and macOS runners):
+
+```bash
+go run ./cmd/golden -out /some/dir
+TALIB_GOLDEN_DIR=/some/dir TALIB_GOLDEN_EXACT=1 go test -count=1 -run Golden ./...
+```
+
 ## Maintenance - Updating TA-Lib
 
-If you wish to do work on this wrapper library or update it, you can:
+Updates are automated:
+
+- **Update TA-Lib** (daily): when TA-Lib publishes a release, regenerates everything, runs the tests and opens a pull request.
+- **Release**: merging that pull request tags the next minor version of this module.
+- **Canary** (weekly): regenerates against TA-Lib's `dev` branch and opens an issue when that stops working, so a structural change shows up before the release that carries it.
+- **CI**: tests on Linux (x86-64, arm64, musl), macOS and Windows, checks the bits against the official build, and checks that `go generate` changes nothing.
+
+The workflows that publish (pull request, tag, issue) act only in `TA-Lib/ta-lib-cgo`; in a fork they do nothing.
+
+To do the same by hand:
 
 - Edit the version tag in the `//go:generate` directive in `talib.go` as needed.
 - Run `go generate` from the repository root.
 - Run `go test -v -count=1 ./...` to make sure it's all working
-- Commit `include/`, `talib_amalgamation.c`, and `*_gen.go` files.
+- Commit `include/`, `talib_amalgamation_*.c`, `*_gen.go`, `golden_gen_test.go` and `testdata/golden/`.
 
-The `go generate` step requires additional tooling including CMake and `uv`.  It will download the TA-Lib source and (re)generate the various function wrappers and test code.  Python (handled via `uv`) is used to generate sample outputs using it's own TA-Lib bindings which we then verify in Go tests.
+The `go generate` step requires git, CMake and a C compiler (`$CC`, else `cc`) on Linux or macOS.  It downloads the TA-Lib source and (re)generates the function wrappers and test code; `cmd/golden` then builds the official TA-Lib library from the same tag and records the output of every function in `testdata/golden/`.
 
-Note that it's always possible some structural change in a new TA-Lib version will require the generator code to be updated.  YMMV.
+The generator stops with an error, rather than guess, when TA-Lib changes in a way it does not understand: a function in `ta_func_api.xml` it did not parse from `ta_func.h`, a new kind of input, a missing file.  That is the case that needs a person.
 
 ## Versioning
 
 This module uses its own semver sequence independent of TA-Lib's version numbering. The embedded TA-Lib version is available at runtime via the `TALibVersion` constant and is the single source of truth in the `//go:generate` directive in `talib.go`. (The reasoning: mirroring TA-Lib versions (e.g. `v0.6.4`) leaves no room for Go-side fixes without inventing non-standard version suffixes.)
 
-To release a new version:
+To release:
 
-1. Edit the version in the `//go:generate` line in `talib.go`:
-   ```go
-   //go:generate go run ./cmd/gen v0.7.0
-   ```
-2. Run codegen and tests:
-   ```bash
-   go generate
-   go test -v -count=1 ./...
-   ```
-3. Commit all regenerated files (`include/`, `talib_amalgamation.c`, `*_gen.go`).
-4. Tag a new minor version noting the TA-Lib bump:
-   ```bash
-   git tag -a v0.2.0 -m "Update to TA-Lib v0.7.0"
-   git push origin v0.2.0
-   ```
+- A TA-Lib update: merge its pull request.  The Release workflow tags the next minor version.
+- A fix to the wrapper itself: `gh workflow run release.yml -f bump=patch` once it is on `main`.
 
 ## Repository structure
 
@@ -137,7 +145,7 @@ ta-lib-cgo
 ├── errors.go                 TALibError type, retCodeMessage()
 │
 │   # Generated by cmd/gen — committed, do not edit by hand
-├── talib_amalgamation.c      All TA-Lib .c files concatenated into one
+├── talib_amalgamation_NN.c   All TA-Lib .c files, concatenated into 16 files
 ├── errors_gen.go             retCodeMessages map (from ta_retcode.csv)
 ├── functions_gen.go          Go wrapper for every TA-Lib indicator
 ├── lookback_gen.go           XxxLookback() companion for every indicator
@@ -145,7 +153,8 @@ ta-lib-cgo
 │
 │   # Test files
 ├── talib_test.go             Shape/invariant/behavior tests (no fixtures needed)
-├── golden_test.go            Fixture-based tests; skips if testdata/ missing
+├── golden_test.go            Compares every function with testdata/golden
+├── golden_gen_test.go        Generated by cmd/gen: one golden_test.go call per function
 │
 │   # Committed headers (populated by cmd/gen)
 ├── include/
@@ -154,27 +163,25 @@ ta-lib-cgo
 │   ├── ta_common.h
 │   ├── ta_defs.h
 │   ├── ta_abstract.h
-│   ├── ta_config.h           Generated by cmake during go generate
 │   └── *.h                   Internal headers copied from src/ subdirectories
 │
-│   # Committed test fixtures (generated by scripts/gen_fixtures.py)
-├── testdata/
-│   ├── input.csv             Synthetic OHLCV input (200 bars, fixed seed)
-│   └── expected/
-│       ├── sma_10.csv        Expected outputs from Python ta-lib reference
-│       ├── macd_12_26_9.csv
-│       └── atr_14.csv
+│   # Committed test fixtures (generated by cmd/golden)
+├── testdata/golden/
+│   ├── input.csv             Synthetic input: OHLCV, a second series, MAVP periods
+│   └── <FUNC>.csv            Output of the official TA-Lib build per function
 │
-│   # Code generation tool
+│   # Code generation tools
 └── cmd/
-    └── gen/
-        └── main.go           Clones TA-Lib, runs cmake, builds amalgamation,
-                              generates *_gen.go files; invoked via go generate
+    ├── gen/
+    │   └── main.go           Clones TA-Lib, builds the amalgamation,
+    │                         generates *_gen.go files; invoked via go generate
+    └── golden/
+        ├── main.go           Builds official TA-Lib, writes testdata/golden;
+        │                     invoked via go generate
+        └── c/dump.c          Runs every function through ta_abstract
 
-    # Python fixture generator and benchmarks (require uv)
+    # Python benchmark (requires uv)
 └── scripts/
-    ├── gen_fixtures.py       Generates testdata/ using Python ta-lib as an
-    │                         independent reference; invoked via go generate
     └── bench.py              Python benchmark counterpart for perf comparison
 ```
 

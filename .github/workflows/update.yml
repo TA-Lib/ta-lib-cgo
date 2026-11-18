@@ -1,0 +1,169 @@
+name: Update TA-Lib
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'TA-Lib release tag, e.g. v0.8.3 (default: the latest release)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-ta-lib
+
+jobs:
+  # Builds and runs TA-Lib's code, so it gets no write access and no credentials.
+  generate:
+    # Only the official repository publishes. A fork with Actions enabled must
+    # not open update pull requests of its own.
+    if: github.repository == 'TA-Lib/ta-lib-cgo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      version: ${{ steps.target.outputs.version }}
+      branch: ${{ steps.target.outputs.branch }}
+      regenerate: ${{ steps.target.outputs.regenerate }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Find the TA-Lib release to embed
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          current="v$(sed -n 's/^const TALibVersion = "\(.*\)"$/\1/p' version_gen.go)"
+          latest="${REQUESTED:-$(gh api repos/TA-Lib/ta-lib/releases/latest --jq .tag_name)}"
+          if ! printf '%s\n' "$latest" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::'$latest' is not a TA-Lib release tag"
+            exit 1
+          fi
+          echo "current=$current latest=$latest"
+          newest="$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)"
+          if [ "$latest" = "$current" ] || [ "$newest" != "$latest" ]; then
+            echo "Nothing to do."
+            exit 0
+          fi
+          branch="update/ta-lib-$latest"
+          regenerate=true
+          if [ -n "$(git ls-remote --heads origin "$branch")" ]; then
+            pulls="$(gh pr list --head "$branch" --state all --json headRepositoryOwner \
+              --jq '[.[] | select(.headRepositoryOwner.login == "TA-Lib")] | length')"
+            if [ "$pulls" != 0 ]; then
+              echo "Branch $branch already has a pull request."
+              exit 0
+            fi
+            # A run that pushed the branch and then failed: only the pull request is missing.
+            regenerate=false
+          fi
+          {
+            echo "version=$latest"
+            echo "branch=$branch"
+            echo "regenerate=$regenerate"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate and test
+        if: steps.target.outputs.regenerate == 'true'
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          sed -i "s|^//go:generate go run ./cmd/gen v.*|//go:generate go run ./cmd/gen $VERSION|" talib.go
+          grep -qx "//go:generate go run ./cmd/gen $VERSION" talib.go
+          go generate ./...
+          go vet ./...
+          # testdata/golden was just built on this machine, so the bits must match.
+          TALIB_GOLDEN_EXACT=1 go test -count=1 ./...
+          git add -A
+          git diff --cached --binary > "$RUNNER_TEMP/update.patch"
+
+      - uses: actions/upload-artifact@v7
+        if: steps.target.outputs.regenerate == 'true'
+        with:
+          name: update-patch
+          path: ${{ runner.temp }}/update.patch
+          retention-days: 7
+
+  # Holds the write token and runs nothing that TA-Lib ships.
+  publish:
+    needs: generate
+    if: needs.generate.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.generate.outputs.version }}
+      BRANCH: ${{ needs.generate.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        if: needs.generate.outputs.regenerate == 'true'
+        with:
+          name: update-patch
+          path: ${{ runner.temp }}
+      - name: Push the branch
+        if: needs.generate.outputs.regenerate == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git apply --index --whitespace=nowarn "$RUNNER_TEMP/update.patch"
+          # The patch comes from the job that ran TA-Lib's build: it may only
+          # touch what go generate writes.
+          stray="$(git diff --cached --no-renames --name-only | grep -Ev '^(include/[^/]+\.h|talib_amalgamation_[0-9]+\.c|[a-z]+_gen\.go|golden_gen_test\.go|testdata/golden/[A-Za-z0-9_]+\.csv|talib\.go)$' || true)"
+          if [ -n "$stray" ]; then
+            echo "::error::the update touches files go generate does not write:"
+            printf '%s\n' "$stray"
+            exit 1
+          fi
+          git commit -m "Update to TA-Lib $VERSION"
+          git push origin "$BRANCH"
+      - name: Open the pull request
+        run: |
+          git fetch origin "$BRANCH"
+          {
+            echo "Regenerated with \`go generate\` for [TA-Lib $VERSION](https://github.com/TA-Lib/ta-lib/releases/tag/$VERSION)."
+            echo
+            echo "Merging tags the next minor version of this module."
+            echo
+            echo '```'
+            git show --stat --format= FETCH_HEAD -- . ':!testdata/golden' ':!include' ':!talib_amalgamation_*.c'
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "$BRANCH" --title "Update to TA-Lib $VERSION" --body-file "$RUNNER_TEMP/body.md"
+          # A pull request opened with the workflow token starts no workflow.
+          gh workflow run ci.yml --ref "$BRANCH"
+
+  report:
+    needs: [generate, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - run: |
+          title="Automatic TA-Lib update failed"
+          body="The update workflow could not regenerate, test or publish the latest TA-Lib release: $RUN_URL"
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

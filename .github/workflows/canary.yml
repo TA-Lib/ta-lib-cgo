@@ -1,0 +1,50 @@
+name: Canary
+
+# Regenerates against TA-Lib's development branch, so a change that breaks the
+# generator shows up before the release that carries it.
+on:
+  schedule:
+    - cron: '43 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    if: github.repository == 'TA-Lib/ta-lib-cgo'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go run ./cmd/gen dev
+      - run: go run ./cmd/golden -ref dev
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+        env:
+          TALIB_GOLDEN_EXACT: 1
+
+  report:
+    needs: canary
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - run: |
+          title="Canary: TA-Lib dev no longer generates or passes"
+          body="Regenerating against TA-Lib \`dev\` failed: $RUN_URL"
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

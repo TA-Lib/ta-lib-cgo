@@ -1,15 +1,12 @@
 # ta-lib-cgo
 
-Go bindings for [TA-Lib](https://github.com/TA-Lib/ta-lib) that embed the C source directly —
+Official Go bindings for [TA-Lib](https://github.com/TA-Lib/ta-lib) that embed the C source directly —
 no system library installation required. Users need only `go get`.  A working CGO environment is the only requirement, works out of the box with typical Go toolchain installations.
 
-> **Note:** The maintainers of TA-Lib have graciously accepted this project under the official
-> TA-Lib GitHub organization. The import path has changed to `github.com/TA-Lib/ta-lib-cgo`
-> and this is the canonical location going forward.
+The import path is `github.com/TA-Lib/ta-lib-cgo`
 
-> **Pure Go:** TA-Lib also publishes an official pure-Go module, [`ta-lib.github.io/go`](https://ta-lib.org/api/go/),
-> generated from the same source as the C library: no cgo, batch and streaming. Use this package when you
-> want the C library itself.
+> **Pure Go:** we also publish a pure version, [`ta-lib.github.io/go`](https://ta-lib.org/api/go/),
+> Recommending cgo for batch performance and pure-go for portability, streaming and abstract API. 
 
 ## Quick start
 
